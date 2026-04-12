@@ -1,0 +1,9 @@
+#define SIGKILL  9
+#define SIGTERM  15
+#define SIGSTOP  17
+#define SIGCONT  19
+#define SIGUSR1  10
+#define SIGUSR2  12
+#define SIGALRM  14
+#define SIGFPE   8
+#define SIGSEGV  11

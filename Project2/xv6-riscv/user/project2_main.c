@@ -246,3 +246,175 @@ static void lottery_print_results(LotteryProcess procs[], int n) {
     printf("  Throughput              : %d/%d processes/unit time\n", n, total_time);
 }
 /* lottery output..*/
+#define EDF_MAX_PROC  20
+#define EDF_MAX_TIME  500
+
+typedef struct {
+    int pid;
+    int arrival_time;
+    int burst_time;
+    int deadline;
+    int remaining_time;
+    int completion_time;
+    int waiting_time;
+    int turnaround_time;
+    int start_time;
+    int is_completed;
+    int missed_deadline;
+} EDFProcess;
+
+static int edf_gantt[EDF_MAX_TIME];
+static int edf_gantt_time = 0;
+
+/* [MEMBER 4] — EDF scheduling: always picks process with earliest deadline */
+static void edf_schedule(EDFProcess proc[], int n) {
+    int completed = 0, time = 0;
+    for (int i = 0; i < EDF_MAX_TIME; i++) edf_gantt[i] = -1;
+
+    while (completed < n) {
+        int idx = -1, earliest = INT_MAX;
+        for (int i = 0; i < n; i++) {
+            if (!proc[i].is_completed && proc[i].arrival_time <= time)
+                if (proc[i].deadline < earliest) {
+                    earliest = proc[i].deadline;
+                    idx = i;
+                }
+        }
+        if (idx == -1) { edf_gantt[edf_gantt_time++] = -1; time++; continue; }
+        if (proc[idx].start_time == -1) proc[idx].start_time = time;
+        edf_gantt[edf_gantt_time++] = proc[idx].pid;
+        proc[idx].remaining_time--;
+        time++;
+        if (proc[idx].remaining_time == 0) {
+            proc[idx].completion_time  = time;
+            proc[idx].turnaround_time  = time - proc[idx].arrival_time;
+            proc[idx].waiting_time     = proc[idx].turnaround_time - proc[idx].burst_time;
+            proc[idx].missed_deadline  = (time > proc[idx].deadline) ? 1 : 0;
+            proc[idx].is_completed     = 1;
+            completed++;
+        }
+    }
+    edf_gantt_time = time;
+}
+
+/* [MEMBER 4] — EDF Gantt chart display */
+static void edf_print_gantt(EDFProcess proc[], int n) {
+    (void)proc; (void)n;
+    printf("\n+--------------------------------------+\n");
+    printf(  "|          GANTT CHART (EDF)           |\n");
+    printf(  "+--------------------------------------+\n");
+
+    int comp_pid[EDF_MAX_TIME];
+    int comp_start[EDF_MAX_TIME];
+    int comp_end[EDF_MAX_TIME];
+    int segs = 0;
+
+    for (int t = 0; t < edf_gantt_time; ) {
+        int cur = edf_gantt[t], start = t;
+        while (t < edf_gantt_time && edf_gantt[t] == cur) t++;
+        comp_pid[segs]   = cur;
+        comp_start[segs] = start;
+        comp_end[segs]   = t;
+        segs++;
+    }
+
+    printf("\n  ");
+    for (int s = 0; s < segs; s++) {
+        int w = comp_end[s] - comp_start[s];
+        if (w > 6) w = 6;
+        print_repeat('-', w + 2);
+    }
+    printf("\n  ");
+    for (int s = 0; s < segs; s++) {
+        int dur = comp_end[s] - comp_start[s];
+        int w   = (dur > 6) ? 6 : dur;
+        if (comp_pid[s] == -1) {
+            printf("|IDL");
+            print_repeat(' ', w - 1);
+            printf("|");
+        } else {
+            printf("|P%-2d", comp_pid[s]);
+            print_repeat(' ', w - 1);
+            printf("|");
+        }
+    }
+    printf("\n  ");
+    for (int s = 0; s < segs; s++) {
+        int w = comp_end[s] - comp_start[s];
+        if (w > 6) w = 6;
+        print_repeat('-', w + 2);
+    }
+    printf("\n  ");
+    for (int s = 0; s < segs; s++) {
+        int dur = comp_end[s] - comp_start[s];
+        int w   = (dur > 6) ? 6 : dur;
+        printf("%-*d", w + 2, comp_start[s]);
+    }
+    printf("%d\n", comp_end[segs - 1]);
+}
+
+/* [MEMBER 4] — EDF per-process timeline with deadline markers */
+static void edf_print_timeline(EDFProcess proc[], int n) {
+    printf("\n+--------------------------------------+\n");
+    printf(  "|      PER-PROCESS TIMELINE (EDF)      |\n");
+    printf(  "+--------------------------------------+\n");
+
+    int max_t = edf_gantt_time > 60 ? 60 : edf_gantt_time;
+    printf("  Time  : ");
+    for (int t = 0; t < max_t; t += 5) printf("%-5d", t);
+    printf("\n");
+
+    for (int i = 0; i < n; i++) {
+        printf("  P%-5d: ", proc[i].pid);
+        for (int t = 0; t < max_t; t++) {
+            if (edf_gantt[t] == proc[i].pid)
+                printf("#");
+            else if (t < proc[i].arrival_time)
+                printf(" ");
+            else
+                printf(".");
+        }
+        if (proc[i].deadline <= max_t)
+            printf(" D=%d", proc[i].deadline);
+        printf("\n");
+    }
+    if (edf_gantt_time > 60)
+        printf("  (truncated at t=60; total=%d)\n", edf_gantt_time);
+}
+
+/* [MEMBER 4] — EDF results table with deadline miss/met status */
+static void edf_print_results(EDFProcess proc[], int n) {
+    printf("\n+--------------------------------------------------------------------------+\n");
+    printf(  "|                    RESULTS TABLE (EDF)                                  |\n");
+    printf(  "+--------------------------------------------------------------------------+\n");
+    printf("  %-5s %-8s %-7s %-9s %-7s %-12s %-13s %-10s %-8s\n",
+           "PID","Arrival","Burst","Deadline","Start","Completion","Turnaround","Waiting","Status");
+    printf("  -------------------------------------------------------------------------\n");
+
+    int total_tat = 0, total_wt = 0, missed = 0;
+    for (int i = 0; i < n; i++) {
+        const char *st = proc[i].missed_deadline ? "MISSED" : "MET";
+        printf("  P%-4d %-8d %-7d %-9d %-7d %-12d %-13d %-10d %s\n",
+               proc[i].pid, proc[i].arrival_time, proc[i].burst_time,
+               proc[i].deadline, proc[i].start_time, proc[i].completion_time,
+               proc[i].turnaround_time, proc[i].waiting_time, st);
+        total_tat += proc[i].turnaround_time;
+        total_wt  += proc[i].waiting_time;
+        if (proc[i].missed_deadline) missed++;
+    }
+    printf("  -------------------------------------------------------------------------\n");
+    printf("  Average Turnaround Time : %d.%02d\n",
+           total_tat/n, (total_tat*100/n) % 100);
+    printf("  Average Waiting Time    : %d.%02d\n",
+           total_wt/n,  (total_wt*100/n)  % 100);
+
+    int idle = 0;
+    for (int t = 0; t < edf_gantt_time; t++) if (edf_gantt[t] == -1) idle++;
+    int util = edf_gantt_time > 0 ? (100*(edf_gantt_time-idle)/edf_gantt_time) : 0;
+    printf("  CPU Utilization         : %d%%\n", util);
+
+    if (missed == 0)
+        printf("  Deadline Miss Rate      : 0/%d (All deadlines MET!)\n", n);
+    else
+        printf("  Deadline Miss Rate      : %d/%d processes MISSED deadline\n", missed, n);
+}

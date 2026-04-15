@@ -676,4 +676,46 @@ static void mlfq_simulate(MLFQSched *s) {
     }
     printf("[Time %d] MLFQ simulation complete.\n\n", s->currentTime);
 }
+*  [MEMBER 6] — MLFQ SCHEDULER: METRICS, OUTPUT & ENTRY POINT
+ * ============================================================ */
+
+/* [MEMBER 6] — Prints MLFQ results table and per-CPU utilization */
+static void mlfq_print_metrics(MLFQSched *s) {
+    printf("\n+--------------------------------------------------------------+\n");
+    printf(  "|                  RESULTS TABLE (MLFQ)                       |\n");
+    printf(  "+--------------------------------------------------------------+\n");
+    printf("  %-6s %-10s %-8s %-12s %-12s %-10s %-10s\n",
+           "PID","Arrival","Burst","Completion","Turnaround","Waiting","Response");
+    printf("  ------------------------------------------------------------------\n");
+
+    int tw = 0, tt = 0, tr = 0;
+    int n = s->processCount;
+    for (int i = 0; i < n; i++) {
+        MProcess *p = s->allProcesses[i];
+        printf("  P%-5d %-10d %-8d %-12d %-12d %-10d %-10d\n",
+               p->pid, p->arrivalTime, p->burstTime, p->completionTime,
+               p->turnaroundTime, p->waitingTime, p->responseTime);
+        tw += p->waitingTime;
+        tt += p->turnaroundTime;
+        tr += p->responseTime;
+    }
+    printf("  ------------------------------------------------------------------\n");
+    printf("  Average Waiting Time    : %d.%02d\n", tw/n, (tw*100/n) % 100);
+    printf("  Average Turnaround Time : %d.%02d\n", tt/n, (tt*100/n) % 100);
+    printf("  Average Response Time   : %d.%02d\n", tr/n, (tr*100/n) % 100);
+    printf("  Throughput              : %d/%d processes/unit time\n", n, s->currentTime);
+
+    printf("\n  CPU Utilization:\n");
+    for (int i = 0; i < s->numCpus; i++) {
+        MCPU *cpu = &s->cpus[i];
+        int util = s->currentTime > 0
+                   ? (cpu->activeTime * 100 / s->currentTime) : 0;
+        printf("  CPU %d: %d%% (Active: %d, Idle: %d)\n",
+               cpu->id, util, cpu->activeTime, cpu->idleTime);
+    }
+}
+/* [END MEMBER 6 — MLFQ metrics] */
+
+
+/*
 

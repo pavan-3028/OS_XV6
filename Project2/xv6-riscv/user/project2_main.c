@@ -418,3 +418,262 @@ static void edf_print_results(EDFProcess proc[], int n) {
     else
         printf("  Deadline Miss Rate      : %d/%d processes MISSED deadline\n", missed, n);
 }
+
+#define MLFQ_MAX_PROC    20
+#define MLFQ_MAX_LEVELS   4
+
+typedef enum { MLFQ_READY, MLFQ_RUNNING, MLFQ_COMPLETED } MState;
+
+typedef struct {
+    int    pid;
+    int    arrivalTime;
+    int    burstTime;
+    int    remainingTime;
+    int    completionTime;
+    int    waitingTime;
+    int    turnaroundTime;
+    int    responseTime;
+    int    firstExecutionTime;
+    int    currentQueueLevel;
+    int    timeSliceConsumed;
+    int    timeSpentInCurrentQueueWaiting;
+    MState state;
+} MProcess;
+
+typedef struct {
+    MProcess *processes[MLFQ_MAX_PROC];
+    int front, rear, size;
+} MQueue;
+
+typedef struct {
+    int       id;
+    MProcess *currentProcess;
+    int       activeTime;
+    int       idleTime;
+} MCPU;
+
+typedef struct {
+    MQueue   queues[MLFQ_MAX_LEVELS];
+    int      timeQuantums[MLFQ_MAX_LEVELS];
+    int      numLevels;
+    int      agingThreshold;
+    int      currentTime;
+    MCPU    *cpus;
+    int      numCpus;
+    MProcess **allProcesses;
+    int      processCount;
+    int      totalCapacity;
+    int      completedProcesses;
+} MLFQSched;
+
+/* [MEMBER 5] — Queue helpers */
+static void mq_init(MQueue *q)    { q->front=0; q->rear=-1; q->size=0; }
+static int  mq_empty(MQueue *q)   { return q->size==0; }
+static void mq_enqueue(MQueue *q, MProcess *p) {
+    if (q->size < MLFQ_MAX_PROC) {
+        q->rear = (q->rear+1) % MLFQ_MAX_PROC;
+        q->processes[q->rear] = p;
+        q->size++;
+    }
+}
+static MProcess *mq_dequeue(MQueue *q) {
+    if (q->size > 0) {
+        MProcess *p = q->processes[q->front];
+        q->front = (q->front+1) % MLFQ_MAX_PROC;
+        q->size--;
+        return p;
+    }
+    return 0;
+}
+
+/* [MEMBER 5] — Initialize and cleanup the MLFQ scheduler */
+static void mlfq_init(MLFQSched *s, int numCpus, int *quantums, int levels, int aging, int maxP) {
+    s->numLevels = (levels > MLFQ_MAX_LEVELS) ? MLFQ_MAX_LEVELS : levels;
+    for (int i = 0; i < s->numLevels; i++) {
+        mq_init(&s->queues[i]);
+        s->timeQuantums[i] = quantums[i];
+    }
+    s->agingThreshold = aging;
+    s->currentTime    = 0;
+    s->numCpus        = numCpus;
+    s->cpus = (MCPU*)malloc(sizeof(MCPU) * numCpus);
+    for (int i = 0; i < numCpus; i++) {
+        s->cpus[i].id             = i;
+        s->cpus[i].currentProcess = 0;
+        s->cpus[i].activeTime     = 0;
+        s->cpus[i].idleTime       = 0;
+    }
+    s->totalCapacity  = maxP;
+    s->allProcesses   = (MProcess**)malloc(sizeof(MProcess*) * maxP);
+    s->processCount   = 0;
+    s->completedProcesses = 0;
+}
+
+static void mlfq_cleanup(MLFQSched *s) {
+    if (s->cpus) free(s->cpus);
+    if (s->allProcesses) {
+        for (int i = 0; i < s->processCount; i++) free(s->allProcesses[i]);
+        free(s->allProcesses);
+    }
+}
+
+static void mlfq_add(MLFQSched *s, MProcess *p) {
+    if (s->processCount < s->totalCapacity)
+        s->allProcesses[s->processCount++] = p;
+}
+
+/* [MEMBER 5] — Handle newly arrived processes */
+static void mlfq_arrivals(MLFQSched *s) {
+    for (int i = 0; i < s->processCount; i++) {
+        MProcess *p = s->allProcesses[i];
+        if (p->arrivalTime == s->currentTime &&
+            p->state == MLFQ_READY && p->firstExecutionTime == -2) {
+            p->firstExecutionTime = -1;
+            p->currentQueueLevel  = 0;
+            p->timeSpentInCurrentQueueWaiting = 0;
+            printf("[Time %3d] P%d arrived -> Queue 0\n", s->currentTime, p->pid);
+            mq_enqueue(&s->queues[0], p);
+        }
+    }
+}
+
+/* [MEMBER 5] — Aging: promote starving processes to higher-priority queues */
+static void mlfq_aging(MLFQSched *s) {
+    for (int i = 1; i < s->numLevels; i++) {
+        int sz = s->queues[i].size;
+        for (int k = 0; k < sz; k++) {
+            MProcess *p = mq_dequeue(&s->queues[i]);
+            p->timeSpentInCurrentQueueWaiting++;
+            if (p->timeSpentInCurrentQueueWaiting >= s->agingThreshold) {
+                printf("[Time %3d] P%d starving -> promoted Q%d->Q%d\n",
+                       s->currentTime, p->pid,
+                       p->currentQueueLevel, p->currentQueueLevel - 1);
+                p->currentQueueLevel--;
+                p->timeSpentInCurrentQueueWaiting = 0;
+                mq_enqueue(&s->queues[p->currentQueueLevel], p);
+            } else {
+                mq_enqueue(&s->queues[i], p);
+            }
+        }
+    }
+    int sz = s->queues[0].size;
+    for (int k = 0; k < sz; k++) {
+        MProcess *p = mq_dequeue(&s->queues[0]);
+        p->timeSpentInCurrentQueueWaiting++;
+        mq_enqueue(&s->queues[0], p);
+    }
+}
+
+/* [MEMBER 5] — Handle completions and time-slice expirations */
+static void mlfq_completions(MLFQSched *s) {
+    for (int i = 0; i < s->numCpus; i++) {
+        MCPU *cpu = &s->cpus[i];
+        if (!cpu->currentProcess) continue;
+        MProcess *p = cpu->currentProcess;
+        if (p->remainingTime == 0) {
+            printf("[Time %3d] P%d completed on CPU%d\n",
+                   s->currentTime, p->pid, cpu->id);
+            p->state           = MLFQ_COMPLETED;
+            p->completionTime  = s->currentTime;
+            p->turnaroundTime  = p->completionTime - p->arrivalTime;
+            p->waitingTime     = p->turnaroundTime - p->burstTime;
+            cpu->currentProcess = 0;
+            s->completedProcesses++;
+        } else if (p->timeSliceConsumed >= s->timeQuantums[p->currentQueueLevel]) {
+            p->state = MLFQ_READY;
+            p->timeSliceConsumed = 0;
+            p->timeSpentInCurrentQueueWaiting = 0;
+            if (p->currentQueueLevel < s->numLevels - 1) p->currentQueueLevel++;
+            printf("[Time %3d] P%d slice expired -> Queue %d\n",
+                   s->currentTime, p->pid, p->currentQueueLevel);
+            mq_enqueue(&s->queues[p->currentQueueLevel], p);
+            cpu->currentProcess = 0;
+        }
+    }
+}
+
+/* [MEMBER 5] — Assign processes to free CPUs, with preemption */
+static void mlfq_assign(MLFQSched *s) {
+    for (int i = 0; i < s->numCpus; i++) {
+        MCPU *cpu = &s->cpus[i];
+        if (!cpu->currentProcess) {
+            for (int j = 0; j < s->numLevels; j++) {
+                if (!mq_empty(&s->queues[j])) {
+                    MProcess *p = mq_dequeue(&s->queues[j]);
+                    if (p->firstExecutionTime == -1) {
+                        p->firstExecutionTime = s->currentTime;
+                        p->responseTime = s->currentTime - p->arrivalTime;
+                    }
+                    p->state = MLFQ_RUNNING;
+                    p->timeSpentInCurrentQueueWaiting = 0;
+                    cpu->currentProcess = p;
+                    printf("[Time %3d] CPU%d <- P%d (Q%d)\n",
+                           s->currentTime, cpu->id, p->pid, p->currentQueueLevel);
+                    break;
+                }
+            }
+        } else {
+            MProcess *rp = cpu->currentProcess;
+            int rq = rp->currentQueueLevel, hq = -1;
+            for (int j = 0; j < s->numLevels; j++) {
+                if (!mq_empty(&s->queues[j])) { hq = j; break; }
+            }
+            if (hq != -1 && hq < rq) {
+                printf("[Time %3d] CPU%d preempting P%d(Q%d) for Q%d\n",
+                       s->currentTime, cpu->id, rp->pid, rq, hq);
+                rp->state = MLFQ_READY;
+                rp->timeSpentInCurrentQueueWaiting = 0;
+                mq_enqueue(&s->queues[rp->currentQueueLevel], rp);
+                MProcess *np = mq_dequeue(&s->queues[hq]);
+                if (np->firstExecutionTime == -1) {
+                    np->firstExecutionTime = s->currentTime;
+                    np->responseTime = s->currentTime - np->arrivalTime;
+                }
+                np->state = MLFQ_RUNNING;
+                np->timeSpentInCurrentQueueWaiting = 0;
+                cpu->currentProcess = np;
+                printf("[Time %3d] CPU%d <- P%d (Q%d)\n",
+                       s->currentTime, cpu->id, np->pid, np->currentQueueLevel);
+            }
+        }
+    }
+}
+
+/* [MEMBER 5] — Advance simulation clock by one tick */
+static void mlfq_tick(MLFQSched *s) {
+    for (int i = 0; i < s->numCpus; i++) {
+        MCPU *cpu = &s->cpus[i];
+        if (cpu->currentProcess) {
+            cpu->currentProcess->remainingTime--;
+            cpu->currentProcess->timeSliceConsumed++;
+            cpu->activeTime++;
+        } else {
+            cpu->idleTime++;
+        }
+    }
+}
+
+/* [MEMBER 5] — Main MLFQ simulation loop */
+static void mlfq_simulate(MLFQSched *s) {
+    printf("\n=== MLFQ Simulation ===\n");
+    printf("CPUs: %d | Levels: %d | Aging: %d\n",
+           s->numCpus, s->numLevels, s->agingThreshold);
+    printf("Time Quantums: ");
+    for (int i = 0; i < s->numLevels; i++) printf("%d ", s->timeQuantums[i]);
+    printf("\n\n");
+
+    while (s->completedProcesses < s->processCount) {
+        mlfq_arrivals(s);
+        mlfq_aging(s);
+        mlfq_completions(s);
+        mlfq_assign(s);
+        mlfq_tick(s);
+        s->currentTime++;
+        if (s->currentTime > 100000) {
+            printf("Time limit exceeded!\n");
+            break;
+        }
+    }
+    printf("[Time %d] MLFQ simulation complete.\n\n", s->currentTime);
+}
+

@@ -117,3 +117,132 @@ static void run_lottery(LotteryProcess procs[], int n) {
         }
     }
 }
+
+/* Prints compressed Gantt chart for lottery */
+static void lottery_print_gantt(void) {
+    printf("\n+--------------------------------------+\n");
+    printf(  "|        GANTT CHART (Lottery)         |\n");
+    printf(  "+--------------------------------------+\n");
+
+    int comp_pid[LOTTERY_MAX_GANTT];
+    int comp_start[LOTTERY_MAX_GANTT];
+    int comp_end[LOTTERY_MAX_GANTT];
+    int segs = 0;
+
+    for (int t = 0; t < l_gantt_len; ) {
+        int cur = l_gantt[t].pid, start = t;
+        while (t < l_gantt_len && l_gantt[t].pid == cur) t++;
+        comp_pid[segs]   = cur;
+        comp_start[segs] = start;
+        comp_end[segs]   = t;
+        segs++;
+    }
+
+    /* Top border */
+    printf("\n  ");
+    for (int s = 0; s < segs; s++) {
+        int w = comp_end[s] - comp_start[s];
+        if (w > 6) w = 6;
+        print_repeat('-', w + 2);
+    }
+    printf("\n  ");
+
+    /* Labels */
+    for (int s = 0; s < segs; s++) {
+        int dur = comp_end[s] - comp_start[s];
+        int w   = (dur > 6) ? 6 : dur;
+        if (comp_pid[s] == -1) {
+            printf("|IDL");
+            print_repeat(' ', w - 1);
+            printf("|");
+        } else {
+            printf("|P%-2d", comp_pid[s]);
+            print_repeat(' ', w - 1);
+            printf("|");
+        }
+    }
+    printf("\n  ");
+
+    /* Bottom border */
+    for (int s = 0; s < segs; s++) {
+        int w = comp_end[s] - comp_start[s];
+        if (w > 6) w = 6;
+        print_repeat('-', w + 2);
+    }
+    printf("\n  ");
+
+    /* Time markers */
+    for (int s = 0; s < segs; s++) {
+        int dur = comp_end[s] - comp_start[s];
+        int w   = (dur > 6) ? 6 : dur;
+        printf("%-*d", w + 2, comp_start[s]);
+    }
+    printf("%d\n", comp_end[segs - 1]);
+}
+
+/* Prints per-process execution timeline */
+static void lottery_print_timeline(LotteryProcess procs[], int n) {
+    printf("\n+--------------------------------------+\n");
+    printf(  "|    PER-PROCESS TIMELINE (Lottery)    |\n");
+    printf(  "+--------------------------------------+\n");
+
+    int max_t = l_gantt_len > 60 ? 60 : l_gantt_len;
+    printf("  Time  : ");
+    for (int t = 0; t < max_t; t += 5) printf("%-5d", t);
+    printf("\n");
+
+    for (int i = 0; i < n; i++) {
+        printf("  P%-5d: ", procs[i].pid);
+        for (int t = 0; t < max_t; t++) {
+            if (l_gantt[t].pid == procs[i].pid)
+                printf("#");
+            else if (t < procs[i].arrival_time)
+                printf(" ");
+            else
+                printf(".");
+        }
+        printf("\n");
+    }
+    if (l_gantt_len > 60)
+        printf("  (truncated at t=60; total=%d)\n", l_gantt_len);
+}
+
+/* Prints results table with averages and CPU utilization */
+static void lottery_print_results(LotteryProcess procs[], int n) {
+    printf("\n+--------------------------------------------------------------+\n");
+    printf(  "|                  RESULTS TABLE (Lottery)                    |\n");
+    printf(  "+--------------------------------------------------------------+\n");
+    printf("  %-8s %-9s %-9s %-7s %-7s %-12s %-10s\n",
+           "Process","Tickets","Arrival","Burst","Wait","Turnaround","Response");
+    printf("  --------------------------------------------------------------\n");
+
+    /* Use integer arithmetic to avoid float issues on xv6 */
+    int sum_wait = 0, sum_tat = 0, sum_resp = 0;
+    for (int i = 0; i < n; i++) {
+        printf("  P%-7d %-9d %-9d %-7d %-7d %-12d %-10d\n",
+               procs[i].pid, procs[i].tickets, procs[i].arrival_time,
+               procs[i].burst_time, procs[i].waiting_time,
+               procs[i].turnaround_time, procs[i].response_time);
+        sum_wait += procs[i].waiting_time;
+        sum_tat  += procs[i].turnaround_time;
+        sum_resp += procs[i].response_time;
+    }
+    printf("  --------------------------------------------------------------\n");
+    /* xv6 printf has no %f — print as integer + decimal manually */
+    printf("  Average Waiting Time    : %d.%02d\n",
+           sum_wait/n, (sum_wait*100/n) % 100);
+    printf("  Average Turnaround Time : %d.%02d\n",
+           sum_tat/n,  (sum_tat*100/n)  % 100);
+    printf("  Average Response Time   : %d.%02d\n",
+           sum_resp/n, (sum_resp*100/n) % 100);
+
+    int idle = 0;
+    for (int i = 0; i < l_gantt_len; i++) if (l_gantt[i].pid == -1) idle++;
+    int total_time = l_gantt[l_gantt_len - 1].time + 1;
+    int util_int  = (total_time - idle) * 100 / total_time;
+    int util_frac = ((total_time - idle) * 10000 / total_time) % 100;
+    printf("  CPU Utilization         : %d.%02d%%\n", util_int, util_frac);
+    /* Throughput: n / total_time as fraction */
+    printf("  Throughput              : %d/%d processes/unit time\n", n, total_time);
+}
+/* lottery output..*/
